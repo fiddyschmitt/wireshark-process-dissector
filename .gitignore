@@ -1,0 +1,12 @@
+# build output
+test_env/*.exe
+test_env/dissector-test-env
+
+# test scratch
+tests/out/
+
+# local, machine-specific config
+test_env/config.json
+
+# logs
+*.log

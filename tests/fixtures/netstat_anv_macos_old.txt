@@ -1,0 +1,11 @@
+Active Internet connections (including servers)
+Proto Recv-Q Send-Q  Local Address          Foreign Address        (state)     rhiwat shiwat    pid   epid  state    options
+tcp4       0      0  *.2222                 *.*                    LISTEN      131072 131072  82109      0 0x0000 0x00000106
+tcp4       0      0  192.168.1.10.50000     93.184.216.34.443      ESTABLISHED 131072 131072    501      0 0x0102 0x00000104
+tcp46      0      0  *.3283                 *.*                    LISTEN      131072 131072   1334      0 0x0000 0x00000106
+udp4       0      0  *.5353                 *.*                                786896   9216    123      0 0x0000 0x00000000
+udp4       0      0  192.168.1.10.60000     8.8.8.8.53                         786896   9216    501      0 0x0000 0x00000000
+tcp6       0      0  ::1.49152              ::1.49153              ESTABLISHED 131072 131072    777      0 0x0102 0x00000104
+tcp6       0      0  fe80::aede:48ff:fe.49214 fe80::aede:48ff:fe.22 ESTABLISHED 131072 131072  888      0 0x0102 0x00000104
+tcp4       0      0  192.168.1.10.50001     93.184.216.34.443      TIME_WAIT   131072 131072      0      0 0x0000 0x00000000
+tcp4       0      0  192.168.1.10.50002     93.184.216.34.443      ESTABLISHED 131072 131072      0    999 0x0102 0x00000104

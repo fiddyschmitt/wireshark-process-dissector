@@ -1,0 +1,10 @@
+udp   UNCONN 0      0            0.0.0.0:5353       0.0.0.0:*     users:(("avahi-daemon",pid=812,fd=12))
+udp   UNCONN 0      0         127.0.0.53%lo:53         0.0.0.0:*     users:(("systemd-resolve",pid=655,fd=13))
+udp   UNCONN 0      0               [::]:5353          [::]:*     users:(("avahi-daemon",pid=812,fd=14))
+udp   ESTAB  0      0      192.168.1.10:41234     1.1.1.1:53    users:(("firefox",pid=4321,fd=88))
+tcp   LISTEN 0      4096       127.0.0.1:631        0.0.0.0:*     users:(("cupsd",pid=901,fd=7))
+tcp   LISTEN 0      128              *:22               *:*     users:(("sshd",pid=1200,fd=3),("sshd",pid=1201,fd=3))
+tcp   ESTAB  0      0      192.168.1.10:52345  93.184.216.34:443   users:(("firefox",pid=4321,fd=120))
+tcp   ESTAB  0      0     [::ffff:192.168.1.10]:8080   [::ffff:192.168.1.20]:50123 users:(("java",pid=7777,fd=45))
+tcp   ESTAB  0      0      [fe80::1%eth0]:49152    [fe80::2%eth0]:22    users:(("ssh",pid=3333,fd=3))
+tcp   TIME-WAIT 0   0      192.168.1.10:52300  93.184.216.34:443
