@@ -1,0 +1,8 @@
+# Check everything out with LF regardless of core.autocrlf. Shell scripts embedded into the
+# Lua dissector and the Go tool run on Linux/macOS, where a stray CR breaks them.
+* text=auto eol=lf
+
+*.pcap binary
+*.pcapng binary
+*.png binary
+*.iso binary

@@ -640,6 +640,10 @@ while :; do
 done
 rm -rf "$LOCKDIR"; rm -f "$PIDFILE" "$PCACHE" "$PCTMP" "$TMP" "$NEWF" "$HINTF"
 ]==]
+-- If this file was checked out with CRLF line endings (e.g. git autocrlf on Windows), the
+-- embedded scripts would inherit them; /bin/sh chokes on a stray CR. Normalise once.
+HELPER_SH = HELPER_SH:gsub("\r\n", "\n")
+HELPER_PS1 = HELPER_PS1:gsub("\r\n", "\n")
 
 ------------------------------------------------------------------------------
 -- 5. Helper files and launch

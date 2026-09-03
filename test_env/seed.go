@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	_ "embed"
 	"encoding/base64"
 	"fmt"
@@ -84,7 +85,9 @@ func renderNetworkConfig(c *Config) string {
 }
 
 func renderUserData(c *Config, bundle []byte) string {
-	scriptB64 := base64.StdEncoding.EncodeToString(setupScript)
+	// Strip any CR from a CRLF checkout: the script runs under bash on the guest.
+	script := bytes.ReplaceAll(setupScript, []byte("\r\n"), []byte("\n"))
+	scriptB64 := base64.StdEncoding.EncodeToString(script)
 	bundleB64 := base64.StdEncoding.EncodeToString(bundle)
 
 	var b strings.Builder
