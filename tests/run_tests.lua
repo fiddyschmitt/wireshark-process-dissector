@@ -215,6 +215,20 @@ PD.learn_snapshot(snap1b, 1002)
 r = PD.lookup("udp", "192.168.1.5", 41234, "1.1.1.1", 53, 1001, false)
 check(r and r.pid == 400 and r.name == "nslookup.exe", "late details upgrade")
 
+-- a Windows service resolving later (same pid/name/path/cmdline) also upgrades in place, so
+-- packets dissected before the helper checked the PID get the service on re-dissection
+local snap1c = PD.parse_snapshot("V 1 1003\nS udp 0.0.0.0 5353 * 0 200\nP 200\tsvchost.exe\tC:\\Windows\\System32\\svchost.exe\t\tDnscache\tDNS Client\n")
+PD.learn_snapshot(snap1c, 1003)
+r = PD.lookup("udp", "192.168.1.5", 5353, "224.0.0.251", 5353, 1000.5, false)
+check(r and r.pid == 200 and r.service == "Dnscache", "late service resolution upgrades earlier packets in place")
+local ent = PD.raw_stats.entries
+-- an unchecked ("" service) sighting afterwards means unknown, not a change: no downgrade, no new entry
+local snap1d = PD.parse_snapshot("V 1 1004\nS udp 0.0.0.0 5353 * 0 200\nP 200\tsvchost.exe\tC:\\Windows\\System32\\svchost.exe\t\n")
+PD.learn_snapshot(snap1d, 1004)
+r = PD.lookup("udp", "192.168.1.5", 5353, "224.0.0.251", 5353, 1004.5, false)
+check(r and r.service == "Dnscache", "unchecked service sighting keeps the resolved service")
+eq(PD.raw_stats.entries, ent, "unchecked service sighting adds no entry")
+
 -- port reuse by a different process later on
 local snap2 = PD.parse_snapshot("V 1 2000\nS tcp 192.168.1.5 52345 93.184.216.34 443 555\nP 555\tfirefox.exe\tC:\\FF\\firefox.exe\tfirefox\n")
 PD.learn_snapshot(snap2, 2000)

@@ -349,6 +349,7 @@ $localSet = @{}         # local IPs as a hashtable, for mapping an event to its 
 $chanEnabledByUs = $false
 $useEvents = $false
 $evDrainAt = Get-Date
+$chanMarker = Join-Path $OutDir 'channel.enabled'   # exists while we own an enabled channel; survives a hard kill
 
 function Set-KnChannel([bool]$enable) {
     $c = New-Object System.Diagnostics.Eventing.Reader.EventLogConfiguration $script:knChannel
@@ -368,9 +369,14 @@ if ($ExactMode -and -not $Once) {
     else {
         try {
             $wasEnabled = (New-Object System.Diagnostics.Eventing.Reader.EventLogConfiguration $knChannel).IsEnabled
+            # A channel found enabled together with our marker file was left behind by a helper
+            # that died before its finally block ran: take ownership so it gets disabled on exit.
+            $leftover = $wasEnabled -and (Test-Path $chanMarker)
             Set-KnChannel $true
-            $useEvents = $true; $chanEnabledByUs = (-not $wasEnabled)
-            Write-Log 'exact mode: Kernel-Network Analytic channel enabled'
+            $useEvents = $true; $chanEnabledByUs = ((-not $wasEnabled) -or $leftover)
+            if ($chanEnabledByUs) { try { Set-Content -Path $chanMarker -Value $PID -ErrorAction Stop } catch {} }
+            if ($leftover) { Write-Log 'exact mode: channel was left enabled by an earlier run; taking ownership' }
+            else { Write-Log 'exact mode: Kernel-Network Analytic channel enabled' }
         } catch { Write-Log ('exact mode: could not enable channel: ' + $_.Exception.Message) }
     }
 }
@@ -508,6 +514,7 @@ try {
         foreach ($k in @($svcChecked.Keys)) { if (-not $seen.ContainsKey($k)) { $svcChecked.Remove($k); $svcShort.Remove($k); $svcDisp.Remove($k) } }
         $svcNeed = @($seen.Keys | Where-Object { $procCache.ContainsKey($_) -and (-not $svcChecked.ContainsKey($_)) })
         if ($svcNeed.Count -gt 0 -and $tick -ge $svcQueryAt) {
+            $svcQueryAt = $tick + 200   # back-off if the query throws; shortened below on success
             try {
                 $mShort = @{}; $mDisp = @{}
                 foreach ($s in @(Get-CimInstance -ClassName Win32_Service -ErrorAction Stop)) {
@@ -561,7 +568,8 @@ try {
     }
 } finally {
     if (-not $Once) { Remove-Item -Path $pidFile -Force -ErrorAction SilentlyContinue }
-    if ($chanEnabledByUs) { try { Set-KnChannel $false } catch {} }
+    # drop the marker only once the channel is really disabled, so a failed disable is retried next run
+    if ($chanEnabledByUs) { try { Set-KnChannel $false; Remove-Item -Path $chanMarker -Force -ErrorAction SilentlyContinue } catch {} }
     if ($mutex) { try { $mutex.ReleaseMutex() } catch {}; try { $mutex.Dispose() } catch {} }
 }
 ]==]
@@ -719,7 +727,8 @@ details_linux() {    # $1 = space separated pid list
         [ -n "$path" ] || path=$($SUDO readlink "/proc/$p/exe" 2>/dev/null)
         path=${path% (deleted)}
         args=""
-        [ -r "/proc/$p/cmdline" ] && args=$(tr '\0' ' ' 2>/dev/null < "/proc/$p/cmdline" | sed 's/ *$//')
+        # NUL separates argv; tabs are also mapped to spaces because TAB delimits the P line
+        [ -r "/proc/$p/cmdline" ] && args=$(tr '\0\t' '  ' 2>/dev/null < "/proc/$p/cmdline" | sed 's/ *$//')
         [ -n "$name$path$args" ] || continue
         printf 'P %s\t%s\t%s\t%s\n' "$p" "$name" "$path" "$args"
     done
@@ -1046,6 +1055,15 @@ local function learn_key(key, rec, t)
         if last.rec.sig == rec.sig then return end
         if last.rec.pid == rec.pid and last.rec.name == "" and last.rec.path == "" then
             last.rec = rec   -- details arrived for a PID we only knew by number
+            return
+        end
+        -- Same process identity, only the (Windows) service membership differs. The helper
+        -- reports "" until it has checked a PID, so "" means unknown, not "no service": keep the
+        -- resolved record, and upgrade in place once (or whenever) the service is known, so
+        -- packets dissected before the check pick it up on re-dissection.
+        if last.rec.pid == rec.pid and last.rec.name == rec.name and last.rec.path == rec.path
+           and last.rec.cmdline == rec.cmdline then
+            if rec.service ~= "" then last.rec = rec end
             return
         end
     end
