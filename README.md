@@ -15,7 +15,9 @@ Get `process_dissector.lua` from the [releases](https://github.com/fiddyschmitt/
 | Field | Description |
 |---|---|
 | `process.pid` | Process ID |
-| `process.name` | Process name |
+| `process.name` | Process name / executable filename |
+| `process.service` | Windows service short name(s) the process hosts, e.g. `Dnscache` — Windows only |
+| `process.service_display` | Service display name(s), e.g. `DNS Client` — Windows only |
 | `process.path` | Executable full path |
 | `process.folder` | Executable folder |
 | `process.filename` | Executable filename |
@@ -29,6 +31,8 @@ process.name == "chrome.exe"
 process.path contains "python"
 process.cmdline contains "--proxy"
 process.side == "src" && process.pid == 1234
+process.service == "Dnscache"
+process.service_display contains "DNS"
 ```
 
 To show a field as a column, right-click it in the packet details and choose *Apply as Column*.

@@ -140,8 +140,10 @@ local snap = PD.parse_snapshot("\239\187\191V 1 1700000000\r\nL 192.168.1.5\r\nL
     .. "S tcp 192.168.1.5 52345 93.184.216.34 443 100\r\n"
     .. "S udp 0.0.0.0 5353 * 0 200\r\n"
     .. "S tcp 443 * 0 300\r\n"   -- malformed (field missing), ignored
-    .. "P 100\tcurl.exe\tC:\\Tools\\curl.exe\tcurl -s https://example.com\r\n"
+    .. "P 100\tcurl.exe\tC:\\Tools\\curl.exe\tcurl -s https://example.com\r\n"   -- 4-field (no service fields)
     .. "P 200\tsvchost.exe\t\t\r\n"
+    .. "P 250\tsvchost.exe\tC:\\Windows\\System32\\svchost.exe\t\tDnscache\tDNS Client\r\n"   -- 6-field, empty cmdline
+    .. "P 260\tsvchost.exe\tC:\\Windows\\System32\\svchost.exe\tsvchost -k netsvcs\tDhcp,EventLog\tDHCP Client, Windows Event Log\r\n"
     .. "P 300\tshort\r\n"
     .. "E something odd\r\n"
     .. "X unknown line\r\n")
@@ -151,8 +153,24 @@ eq(#snap.sockets, 2, "two sockets")
 eq(snap.sockets[1].rip, "93.184.216.34", "socket rip"); eq(snap.sockets[1].pid, 100, "socket pid")
 eq(snap.sockets[2].rip, "*", "socket wildcard remote"); eq(snap.sockets[2].rport, 0, "socket rport 0")
 eq(snap.procs[100].cmdline, "curl -s https://example.com", "cmdline"); eq(snap.procs[100].path, "C:\\Tools\\curl.exe", "path")
+eq(snap.procs[100].service, "", "4-field P line has empty service"); eq(snap.procs[100].service_display, "", "4-field empty display")
 eq(snap.procs[200].path, "", "empty path"); eq(snap.procs[300].name, "short", "short P line")
+eq(snap.procs[250].service, "Dnscache", "6-field service short parsed"); eq(snap.procs[250].service_display, "DNS Client", "6-field service display parsed")
+eq(snap.procs[250].cmdline, "", "6-field empty cmdline")
+eq(snap.procs[260].cmdline, "svchost -k netsvcs", "6-field cmdline kept separate from service")
+eq(snap.procs[260].service, "Dhcp,EventLog", "6-field multi short"); eq(snap.procs[260].service_display, "DHCP Client, Windows Event Log", "6-field multi display")
 eq(#snap.errors, 1, "error line")
+
+------------------------------------------------------------------------------
+out("== service fields")
+local rsvc = PD.make_record(4, "svchost.exe", "C:\\Windows\\System32\\svchost.exe", "svchost -k netsvcs", "Dnscache", "DNS Client")
+eq(rsvc.name, "svchost.exe", "process.name stays the bare exe filename")
+eq(rsvc.service, "Dnscache", "service short name kept"); eq(rsvc.service_display, "DNS Client", "service display name kept")
+local rplain = PD.make_record(5, "chrome.exe", "C:\\c\\chrome.exe", "chrome")
+eq(rplain.service, "", "no service is empty short"); eq(rplain.service_display, "", "no service is empty display")
+-- a non-svchost service host is treated identically
+local rdef = PD.make_record(6, "MsMpEng.exe", "C:\\x\\MsMpEng.exe", "", "WinDefend", "Microsoft Defender Antivirus Service")
+eq(rdef.name, "MsMpEng.exe", "non-svchost service name is the exe"); eq(rdef.service_display, "Microsoft Defender Antivirus Service", "non-svchost display kept")
 
 ------------------------------------------------------------------------------
 out("== learn / lookup")

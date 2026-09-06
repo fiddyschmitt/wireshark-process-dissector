@@ -4,7 +4,9 @@
 -- captured on the local machine, so you can filter on the owning process:
 --
 --   process.pid        PID
---   process.name       Process name (as reported by the OS)
+--   process.name       Process name / executable filename (as reported by the OS)
+--   process.service    Windows service short name(s) hosted by the process, e.g. "Dnscache" (Windows only)
+--   process.service_display  Service display name(s), e.g. "DNS Client" (Windows only)
 --   process.folder     Executable folder
 --   process.filename   Executable filename
 --   process.path       Executable full path
@@ -123,13 +125,15 @@ local proto = Proto("process", "Process Info")
 
 local f_pid      = ProtoField.uint32("process.pid", "PID", base.DEC)
 local f_name     = ProtoField.string("process.name", "Process name")
+local f_service  = ProtoField.string("process.service", "Service name")
+local f_service_disp = ProtoField.string("process.service_display", "Service display name")
 local f_folder   = ProtoField.string("process.folder", "Executable folder")
 local f_filename = ProtoField.string("process.filename", "Executable filename")
 local f_path     = ProtoField.string("process.path", "Executable full path")
 local f_cmdline  = ProtoField.string("process.cmdline", "Command line")
 local f_side     = ProtoField.string("process.side", "Side")
 
-proto.fields = { f_pid, f_name, f_folder, f_filename, f_path, f_cmdline, f_side }
+proto.fields = { f_pid, f_name, f_service, f_service_disp, f_folder, f_filename, f_path, f_cmdline, f_side }
 
 proto.prefs.enabled = Pref.bool("Enabled", true,
     "Add process information to TCP and UDP packets captured on this machine.")
@@ -322,6 +326,10 @@ if (-not $Once) {
 $scriptTime = (Get-Item $PSCommandPath).LastWriteTimeUtc
 $procCache = @{}
 $retryAt = @{}
+$svcShort = @{}          # pid -> comma-joined service short names   (service processes only)
+$svcDisp = @{}           # pid -> comma-joined service display names (service processes only)
+$svcChecked = @{}        # pid -> $true once we have looked up its service membership
+$svcQueryAt = 0          # throttle: earliest tick we may run another Win32_Service query
 $localIPs = @()
 $ipTick = 0
 $tick = 0
@@ -491,11 +499,45 @@ try {
             }
             foreach ($m in $missing) { if (-not $procCache.ContainsKey($m)) { $retryAt[$m] = $tick + 10 } }
         }
+
+        # Resolve the Windows service(s) each process hosts (not just svchost - many services run
+        # under their own exe), so a name like svchost.exe or MsMpEng.exe can be shown with its
+        # service and display name. Win32_Service is relatively slow (~0.5s) but one query maps
+        # every running service at once, so we query - throttled - whenever a seen process has not
+        # been checked yet, then remember the result (service or not) for that PID's lifetime.
+        foreach ($k in @($svcChecked.Keys)) { if (-not $seen.ContainsKey($k)) { $svcChecked.Remove($k); $svcShort.Remove($k); $svcDisp.Remove($k) } }
+        $svcNeed = @($seen.Keys | Where-Object { $procCache.ContainsKey($_) -and (-not $svcChecked.ContainsKey($_)) })
+        if ($svcNeed.Count -gt 0 -and $tick -ge $svcQueryAt) {
+            try {
+                $mShort = @{}; $mDisp = @{}
+                foreach ($s in @(Get-CimInstance -ClassName Win32_Service -ErrorAction Stop)) {
+                    $sp = 0; try { $sp = [int]$s.ProcessId } catch {}
+                    if ($sp -ne 0) {
+                        $sn = Clean $s.Name
+                        $dn = Clean $(if ($s.DisplayName) { $s.DisplayName } else { $s.Name })
+                        if ($mShort.ContainsKey($sp)) { $mShort[$sp] = $mShort[$sp] + ',' + $sn; $mDisp[$sp] = $mDisp[$sp] + ', ' + $dn }
+                        else { $mShort[$sp] = $sn; $mDisp[$sp] = $dn }
+                    }
+                }
+                foreach ($p in @($seen.Keys)) {
+                    if ($procCache.ContainsKey($p)) {
+                        $svcChecked[$p] = $true
+                        if ($mShort.ContainsKey($p)) { $svcShort[$p] = $mShort[$p]; $svcDisp[$p] = $mDisp[$p] }
+                    }
+                }
+                $svcQueryAt = $tick + 40
+            } catch { Write-Log ('Win32_Service query failed: ' + $_.Exception.Message) }
+        }
+
         $out = @('V 1 ' + (Get-Epoch) + ' ' + $tick)
         $out += @($localIPs | ForEach-Object { 'L ' + $_ })
         $out += $sLines
         $out += $evSLines
-        $out += @(foreach ($k in $procCache.Keys) { 'P ' + $k + "`t" + $procCache[$k] })
+        $out += @(foreach ($k in $procCache.Keys) {
+            $sn = if ($svcShort.ContainsKey($k)) { $svcShort[$k] } else { '' }
+            $dn = if ($svcDisp.ContainsKey($k)) { $svcDisp[$k] } else { '' }
+            'P ' + $k + "`t" + $procCache[$k] + "`t" + $sn + "`t" + $dn
+        })
         $text = ($out -join "`n") + "`n"
         $written = $false
         try { [System.IO.File]::WriteAllText($tmp, $text, (New-Object System.Text.UTF8Encoding($false))); $written = $true } catch {}
@@ -951,13 +993,15 @@ local local_ips = {}   -- normalised ip -> true
 local stats = { refreshes = 0, snapshots_ok = 0, snapshot_errors = 0, keys = 0, entries = 0,
                 proc_scans = 0, lookups = 0, hits = 0, last_epoch = 0 }
 
-local function make_record(pid, name, path, cmdline)
+local function make_record(pid, name, path, cmdline, service, service_display)
     name, path, cmdline = name or "", path or "", cmdline or ""
-    local sig = pid .. "|" .. name .. "|" .. path .. "|" .. cmdline
+    service, service_display = service or "", service_display or ""
+    local sig = pid .. "|" .. name .. "|" .. path .. "|" .. cmdline .. "|" .. service .. "|" .. service_display
     local r = records[sig]
     if r then return r end
     local folder, filename = split_path(path)
-    r = { pid = pid, name = name, path = path, folder = folder, filename = filename, cmdline = cmdline, sig = sig }
+    r = { pid = pid, name = name, path = path, folder = folder, filename = filename,
+          cmdline = cmdline, service = service, service_display = service_display, sig = sig }
     records[sig] = r
     return r
 end
@@ -1075,12 +1119,19 @@ local function parse_snapshot(text)
                 }
             end
         elseif tag == "P" then
-            local pid, name, path, cmdline = line:match("^P (%d+)\t([^\t]*)\t([^\t]*)\t(.*)$")
+            -- P <pid>\t<name>\t<path>\t<cmdline>\t<service>\t<service_display>
+            -- (older helpers stop at <cmdline>; the service fields default to empty).
+            local pid, name, path, cmdline, service, sdisp = line:match("^P (%d+)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t(.*)$")
             if pid then
-                snap.procs[tonumber(pid)] = { name = trim(name), path = trim(path), cmdline = trim(cmdline) }
+                snap.procs[tonumber(pid)] = { name = trim(name), path = trim(path), cmdline = trim(cmdline), service = trim(service), service_display = trim(sdisp) }
             else
-                pid, name = line:match("^P (%d+)\t([^\t]*)$")
-                if pid then snap.procs[tonumber(pid)] = { name = trim(name), path = "", cmdline = "" } end
+                pid, name, path, cmdline = line:match("^P (%d+)\t([^\t]*)\t([^\t]*)\t(.*)$")
+                if pid then
+                    snap.procs[tonumber(pid)] = { name = trim(name), path = trim(path), cmdline = trim(cmdline), service = "", service_display = "" }
+                else
+                    pid, name = line:match("^P (%d+)\t([^\t]*)$")
+                    if pid then snap.procs[tonumber(pid)] = { name = trim(name), path = "", cmdline = "", service = "", service_display = "" } end
+                end
             end
         elseif tag == "L" then
             local ip = line:match("^L (%S+)")
@@ -1102,7 +1153,7 @@ local function learn_snapshot(snap, t)
     for _, s in ipairs(snap.sockets) do
         local p = snap.procs[s.pid]
         local rec
-        if p then rec = make_record(s.pid, p.name, p.path, p.cmdline)
+        if p then rec = make_record(s.pid, p.name, p.path, p.cmdline, p.service, p.service_display)
         else rec = make_record(s.pid, "", "", "") end
         learn_socket(s.proto, s.lip, s.lport, s.rip, s.rport, rec, t)
     end
@@ -1390,14 +1441,18 @@ local function add_process(tree, root, rec, side, label_prefix)
         root = tree:add(proto, "Process Info")
         root:set_generated()
     end
-    local shown = rec.name
-    if shown == "" then shown = rec.filename end
+    local shown = rec.name ~= "" and rec.name or rec.filename
     if shown == "" then shown = "?" end
+    -- enrich the tree label / summary (cosmetic only) with the service, so it reads
+    -- "svchost.exe (DNS Client)"; the process.name field itself stays the bare exe.
+    if rec.service_display and rec.service_display ~= "" then shown = shown .. " (" .. rec.service_display .. ")" end
     local item = root:add(f_side, side)
     item:set_text(string.format("%s: %s (PID %d)", label_prefix, shown, rec.pid))
     item:set_generated()
     item:add(f_pid, rec.pid):set_generated()
     if rec.name ~= "" then item:add(f_name, rec.name):set_generated() end
+    if rec.service and rec.service ~= "" then item:add(f_service, rec.service):set_generated() end
+    if rec.service_display and rec.service_display ~= "" then item:add(f_service_disp, rec.service_display):set_generated() end
     if rec.folder ~= "" then item:add(f_folder, rec.folder):set_generated() end
     if rec.filename ~= "" then item:add(f_filename, rec.filename):set_generated() end
     if rec.path ~= "" then item:add(f_path, rec.path):set_generated() end
