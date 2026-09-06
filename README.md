@@ -42,10 +42,12 @@ Packets carry no process information, so the dissector maps each packet's local 
 
 Long-lived connections resolve reliably. A socket that opens and closes between two polls can be missed. Other users' processes need root / admin (see Preferences → Protocols → Process Info).
 
+On **Windows, when Wireshark runs elevated**, the helper also consumes Kernel-Network connect/accept events, so short-lived connections between polls are caught too. It enables an isolated, bounded, circular Analytic log while capturing and disables it on exit — no persistent change. Turn it off with the "use connection events when elevated" preference.
+
 ## Tests
 
 ```
 tshark -X lua_script:tests/run_tests.lua -r tests/empty.pcap
 ```
 
-Live-capture checks are in `tests/live/`. `test_env/` stands up a throwaway Linux desktop VM for testing.
+Live-capture checks are in `tests/live/` (`exact_mode_check.ps1` validates the elevated Windows path). `test_env/` stands up a throwaway Linux desktop VM for testing.

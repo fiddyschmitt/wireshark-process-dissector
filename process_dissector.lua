@@ -149,6 +149,10 @@ proto.prefs.helper_dir = Pref.string("Helper folder", "",
     "Folder for the helper script and its snapshot file. Empty = <personal configuration>/process_dissector.")
 proto.prefs.helper_sudo = Pref.bool("Use sudo in the helper (Linux/macOS)", false,
     "Run lsof/ss/readlink through 'sudo -n' so processes of other users are visible. Requires passwordless sudo.")
+proto.prefs.exact_windows = Pref.bool("Windows: use connection events when elevated", true,
+    "When Wireshark runs elevated on Windows, also capture Kernel-Network connect/accept events so "
+    .. "short-lived connections that fall between polls are still attributed. Enables an isolated, bounded, "
+    .. "circular Analytic log only while capturing and disables it on exit. No effect when not elevated.")
 proto.prefs.debug = Pref.bool("Debug logging", false,
     "Write diagnostic messages to stderr (visible in tshark; Wireshark Tools > Lua Console shows stats via ProcessDissector.stats()).")
 
@@ -174,7 +178,8 @@ param(
     [int]$IdleInterval = 2,      # seconds between polls while idle (0 = same as Interval)
     [string]$OutDir = "",
     [switch]$Once,
-    [string]$NetstatFile = ""
+    [string]$NetstatFile = "",
+    [switch]$ExactMode          # elevated only: also consume Kernel-Network connect/accept events
 )
 $ErrorActionPreference = 'Continue'
 if (-not $OutDir) { $OutDir = Split-Path -Parent $PSCommandPath }
@@ -321,7 +326,35 @@ $localIPs = @()
 $ipTick = 0
 $tick = 0
 
-Write-Log ('helper started, interval ' + $Interval + ' ms, api=' + $useApi)
+# --- Exact mode: Kernel-Network connection events (elevated only) --------------------------
+# Captures socket connect/accept (and UDP first send/recv) events, so short-lived connections
+# that fall between polls are still attributed. Enables an isolated, bounded, circular Analytic
+# log only while running, and disables it on exit - nothing persistent survives.
+$knChannel = 'Microsoft-Windows-Kernel-Network/Analytic'
+$knOpenIds = @(12, 15, 28, 31, 42, 43, 58, 59)   # TCP connect/accept (v4/v6), UDP send/recv (v4/v6)
+$evFlows = @{}          # "proto|lip|lport|rip|rport|pid" -> tick last seen (bounded ring)
+$evLastRid = 0          # EventRecordID high-water mark for draining
+$localSet = @{}         # local IPs as a hashtable, for mapping an event to its local endpoint
+$chanEnabledByUs = $false
+$useEvents = $false
+if ($ExactMode -and -not $Once) {
+    $elevated = $false
+    try { $elevated = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator) } catch { $elevated = $false }
+    if (-not $elevated) { Write-Log 'exact mode requested but not elevated; polling only' }
+    else {
+        $we = "$env:SystemRoot\System32\wevtutil.exe"
+        try {
+            $st = & $we gl $knChannel /f:xml 2>$null
+            $wasEnabled = ("$st" -match '<enabled>true</enabled>')
+            & $we sl $knChannel /e:true /rt:false /ms:8388608 2>$null
+            if ($LASTEXITCODE -ne 0) { & $we sl $knChannel /e:true 2>$null }
+            if ($LASTEXITCODE -eq 0) { $useEvents = $true; $chanEnabledByUs = (-not $wasEnabled); Write-Log 'exact mode: Kernel-Network Analytic channel enabled' }
+        } catch {}
+        if (-not $useEvents) { Write-Log 'exact mode: could not enable channel; polling only' }
+    }
+}
+
+Write-Log ('helper started, interval ' + $Interval + ' ms, api=' + $useApi + ', events=' + $useEvents)
 try {
     while ($true) {
         if ((-not $Once) -and (((Get-Date) - $lastCheck).TotalSeconds -ge 2)) {
@@ -351,6 +384,60 @@ try {
                 }
             })
         }
+
+        # refresh the local IP set (used to map events to their local endpoint), then drain any
+        # new Kernel-Network connect/accept events into $evFlows and emit the ephemeral ones.
+        if ($ipTick -le 0) {
+            $localIPs = @(Get-LocalIPs)
+            $localSet = @{}; foreach ($ip in $localIPs) { $localSet[$ip] = $true }
+            $ipTick = 240
+        }
+        $ipTick--
+
+        $evSLines = @()
+        if ($useEvents) {
+            try {
+                $idFilter = ($knOpenIds | ForEach-Object { "EventID=$_" }) -join ' or '
+                $events = $null
+                try { $events = Get-WinEvent -LogName $knChannel -Oldest -FilterXPath "*[System[EventRecordID>$evLastRid and ($idFilter)]]" -MaxEvents 5000 -ErrorAction Stop } catch { $events = $null }
+                foreach ($e in $events) {
+                    if ($e.RecordId -gt $evLastRid) { $evLastRid = $e.RecordId }
+                    $epid = 0; try { $epid = [int]$e.Properties[0].Value } catch {}
+                    if ($epid -le 0) { continue }
+                    $mm = [regex]::Matches([string]$e.Message, '([0-9A-Fa-f\.:%\[\]]+):(\d+)')
+                    if ($mm.Count -lt 2) { continue }
+                    $a1 = $mm[0].Groups[1].Value.Trim('[', ']'); $p1 = $mm[0].Groups[2].Value
+                    $a2 = $mm[1].Groups[1].Value.Trim('[', ']'); $p2 = $mm[1].Groups[2].Value
+                    $j = $a1.IndexOf('%'); if ($j -ge 0) { $a1 = $a1.Substring(0, $j) }
+                    $j = $a2.IndexOf('%'); if ($j -ge 0) { $a2 = $a2.Substring(0, $j) }
+                    $eproto = if ($e.Id -ge 42) { 'udp' } else { 'tcp' }
+                    # assign local/remote by IP membership, so connect / accept / recv all map right
+                    if ($localSet.ContainsKey($a1) -or $a1 -like '127.*' -or $a1 -eq '::1') { $lip = $a1; $lport = $p1; $rip = $a2; $rport = $p2 }
+                    elseif ($localSet.ContainsKey($a2)) { $lip = $a2; $lport = $p2; $rip = $a1; $rport = $p1 }
+                    else { $lip = $a1; $lport = $p1; $rip = $a2; $rport = $p2 }
+                    $evFlows["$eproto|$lip|$lport|$rip|$rport|$epid"] = $tick
+                }
+            } catch { Write-Log ('exact-mode drain error: ' + $_.Exception.Message) }
+            # age out flows the Lua has surely learned (>12 ticks old), and cap the ring size
+            if ($evFlows.Count -gt 0) {
+                $cut = $tick - 12
+                foreach ($k in @($evFlows.Keys)) { if ($evFlows[$k] -lt $cut) { $evFlows.Remove($k) } }
+                if ($evFlows.Count -gt 4000) {
+                    foreach ($d in @($evFlows.GetEnumerator() | Sort-Object Value | Select-Object -First ($evFlows.Count - 4000))) { $evFlows.Remove($d.Key) }
+                }
+            }
+            # emit only flows not already present in the current poll set (keeps the snapshot lean)
+            $pollKeys = @{}
+            foreach ($l in $sLines) { $tk = $l.Split(' '); if ($tk.Count -ge 6) { $pollKeys[($tk[1..5] -join '|')] = $true } }
+            foreach ($k in @($evFlows.Keys)) {
+                $f = $k.Split('|')
+                if (-not $pollKeys.ContainsKey(($f[0..4] -join '|'))) {
+                    $evSLines += ('S ' + $f[0] + ' ' + $f[1] + ' ' + $f[2] + ' ' + $f[3] + ' ' + $f[4] + ' ' + $f[5])
+                    $seen[[int]$f[5]] = $true
+                }
+            }
+        }
+
         foreach ($k in @($procCache.Keys)) { if (-not $seen.ContainsKey($k)) { $procCache.Remove($k); $retryAt.Remove($k) } }
         $missing = @($seen.Keys | Where-Object { (-not $procCache.ContainsKey($_)) -and ((-not $retryAt.ContainsKey($_)) -or ($retryAt[$_] -le $tick)) })
         if ($missing.Count -gt 0) {
@@ -382,11 +469,10 @@ try {
             }
             foreach ($m in $missing) { if (-not $procCache.ContainsKey($m)) { $retryAt[$m] = $tick + 10 } }
         }
-        if ($ipTick -le 0) { $localIPs = @(Get-LocalIPs); $ipTick = 240 }
-        $ipTick--
         $out = @('V 1 ' + (Get-Epoch) + ' ' + $tick)
         $out += @($localIPs | ForEach-Object { 'L ' + $_ })
         $out += $sLines
+        $out += $evSLines
         $out += @(foreach ($k in $procCache.Keys) { 'P ' + $k + "`t" + $procCache[$k] })
         $text = ($out -join "`n") + "`n"
         $written = $false
@@ -411,6 +497,7 @@ try {
     }
 } finally {
     if (-not $Once) { Remove-Item -Path $pidFile -Force -ErrorAction SilentlyContinue }
+    if ($chanEnabledByUs) { try { & "$env:SystemRoot\System32\wevtutil.exe" sl $knChannel /e:false 2>$null } catch {} }
     if ($mutex) { try { $mutex.ReleaseMutex() } catch {}; try { $mutex.Dispose() } catch {} }
 }
 ]==]
@@ -702,9 +789,10 @@ local function build_launch_command(paths)
     if IS_WINDOWS then
         local sysroot = os.getenv("SystemRoot") or "C:\\Windows"
         local ps = sysroot .. "\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"
+        local exact = proto.prefs.exact_windows and " -ExactMode" or ""
         return string.format(
-            'start "" /min "%s" -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File "%s" -Interval %d -IdleInterval %d -OutDir "%s"',
-            ps, paths.script, poll_ms, idle, paths.dir)
+            'start "" /min "%s" -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File "%s" -Interval %d -IdleInterval %d -OutDir "%s"%s',
+            ps, paths.script, poll_ms, idle, paths.dir, exact)
     else
         local env = proto.prefs.helper_sudo and "PD_SUDO=1 " or ""
         return string.format('%snohup /bin/sh "%s" %d %d "%s" >/dev/null 2>&1 &',
