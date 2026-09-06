@@ -327,30 +327,43 @@ $ipTick = 0
 $tick = 0
 
 # --- Exact mode: Kernel-Network connection events (elevated only) --------------------------
-# Captures socket connect/accept (and UDP first send/recv) events, so short-lived connections
-# that fall between polls are still attributed. Enables an isolated, bounded, circular Analytic
-# log only while running, and disables it on exit - nothing persistent survives.
+# Captures socket connect/accept (and UDP send/recv) events, so short-lived connections that
+# fall between polls are still attributed. The Analytic channel is not readable while enabled,
+# so each drain disables it (which flushes its buffer), reads, then re-enables it (which also
+# clears it) - done only while actively dissecting, and disabled entirely on exit. Nothing
+# persistent survives. Enable/disable go through the config API (prompt-free); LogMode is left
+# untouched (it is already Circular and cannot be re-set on an analytic channel).
 $knChannel = 'Microsoft-Windows-Kernel-Network/Analytic'
 $knOpenIds = @(12, 15, 28, 31, 42, 43, 58, 59)   # TCP connect/accept (v4/v6), UDP send/recv (v4/v6)
+$knIdFilter = ($knOpenIds | ForEach-Object { "EventID=$_" }) -join ' or '
 $evFlows = @{}          # "proto|lip|lport|rip|rport|pid" -> tick last seen (bounded ring)
-$evLastRid = 0          # EventRecordID high-water mark for draining
 $localSet = @{}         # local IPs as a hashtable, for mapping an event to its local endpoint
 $chanEnabledByUs = $false
 $useEvents = $false
+$evDrainAt = Get-Date
+
+function Set-KnChannel([bool]$enable) {
+    $c = New-Object System.Diagnostics.Eventing.Reader.EventLogConfiguration $script:knChannel
+    if ($enable) {
+        $c.ProviderKeywords = 0x30            # KERNEL_NETWORK IPv4 (0x10) | IPv6 (0x20)
+        $c.ProviderLevel = 4                  # Informational (the level of these events)
+        try { $c.MaximumSizeInBytes = 33554432 } catch {}   # 32 MB circular; best-effort
+    }
+    $c.IsEnabled = $enable
+    $c.SaveChanges()
+}
+
 if ($ExactMode -and -not $Once) {
     $elevated = $false
     try { $elevated = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator) } catch { $elevated = $false }
     if (-not $elevated) { Write-Log 'exact mode requested but not elevated; polling only' }
     else {
-        $we = "$env:SystemRoot\System32\wevtutil.exe"
         try {
-            $st = & $we gl $knChannel /f:xml 2>$null
-            $wasEnabled = ("$st" -match '<enabled>true</enabled>')
-            & $we sl $knChannel /e:true /rt:false /ms:8388608 2>$null
-            if ($LASTEXITCODE -ne 0) { & $we sl $knChannel /e:true 2>$null }
-            if ($LASTEXITCODE -eq 0) { $useEvents = $true; $chanEnabledByUs = (-not $wasEnabled); Write-Log 'exact mode: Kernel-Network Analytic channel enabled' }
-        } catch {}
-        if (-not $useEvents) { Write-Log 'exact mode: could not enable channel; polling only' }
+            $wasEnabled = (New-Object System.Diagnostics.Eventing.Reader.EventLogConfiguration $knChannel).IsEnabled
+            Set-KnChannel $true
+            $useEvents = $true; $chanEnabledByUs = (-not $wasEnabled)
+            Write-Log 'exact mode: Kernel-Network Analytic channel enabled'
+        } catch { Write-Log ('exact mode: could not enable channel: ' + $_.Exception.Message) }
     }
 }
 
@@ -396,12 +409,20 @@ try {
 
         $evSLines = @()
         if ($useEvents) {
-            try {
-                $idFilter = ($knOpenIds | ForEach-Object { "EventID=$_" }) -join ' or '
-                $events = $null
-                try { $events = Get-WinEvent -LogName $knChannel -Oldest -FilterXPath "*[System[EventRecordID>$evLastRid and ($idFilter)]]" -MaxEvents 5000 -ErrorAction Stop } catch { $events = $null }
+            # Only cycle the channel while actively dissecting recent packets, and at most ~1/s,
+            # to keep config churn down. The analytic log is not readable while enabled, so:
+            # disable (flush) -> read -> re-enable (clears + resumes) with the read kept short so
+            # the blind gap is tiny. Parsing is done after re-enabling, outside the gap.
+            $activeNow = $false
+            try { if (Test-Path $activeFile) { $activeNow = (((Get-Date) - (Get-Item $activeFile).LastWriteTime).TotalSeconds -lt 15) } } catch {}
+            if ($activeNow -and ((Get-Date) -ge $evDrainAt)) {
+                $events = @()
+                try {
+                    Set-KnChannel $false
+                    try { $events = @(Get-WinEvent -LogName $knChannel -Oldest -FilterXPath "*[System[($knIdFilter)]]" -MaxEvents 5000 -ErrorAction Stop) } catch { $events = @() }
+                    Set-KnChannel $true
+                } catch { Write-Log ('exact-mode drain error: ' + $_.Exception.Message); try { Set-KnChannel $true } catch {} }
                 foreach ($e in $events) {
-                    if ($e.RecordId -gt $evLastRid) { $evLastRid = $e.RecordId }
                     $epid = 0; try { $epid = [int]$e.Properties[0].Value } catch {}
                     if ($epid -le 0) { continue }
                     $mm = [regex]::Matches([string]$e.Message, '([0-9A-Fa-f\.:%\[\]]+):(\d+)')
@@ -417,10 +438,11 @@ try {
                     else { $lip = $a1; $lport = $p1; $rip = $a2; $rport = $p2 }
                     $evFlows["$eproto|$lip|$lport|$rip|$rport|$epid"] = $tick
                 }
-            } catch { Write-Log ('exact-mode drain error: ' + $_.Exception.Message) }
-            # age out flows the Lua has surely learned (>12 ticks old), and cap the ring size
+                $evDrainAt = (Get-Date).AddSeconds(1)
+            }
+            # age out flows the Lua has surely learned, and cap the ring size
             if ($evFlows.Count -gt 0) {
-                $cut = $tick - 12
+                $cut = $tick - 20
                 foreach ($k in @($evFlows.Keys)) { if ($evFlows[$k] -lt $cut) { $evFlows.Remove($k) } }
                 if ($evFlows.Count -gt 4000) {
                     foreach ($d in @($evFlows.GetEnumerator() | Sort-Object Value | Select-Object -First ($evFlows.Count - 4000))) { $evFlows.Remove($d.Key) }
@@ -497,7 +519,7 @@ try {
     }
 } finally {
     if (-not $Once) { Remove-Item -Path $pidFile -Force -ErrorAction SilentlyContinue }
-    if ($chanEnabledByUs) { try { & "$env:SystemRoot\System32\wevtutil.exe" sl $knChannel /e:false 2>$null } catch {} }
+    if ($chanEnabledByUs) { try { Set-KnChannel $false } catch {} }
     if ($mutex) { try { $mutex.ReleaseMutex() } catch {}; try { $mutex.Dispose() } catch {} }
 }
 ]==]

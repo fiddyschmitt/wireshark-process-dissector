@@ -1,79 +1,101 @@
 <#
-  Validates the Windows "exact mode" path used by the dissector helper: enable the
-  Microsoft-Windows-Kernel-Network Analytic channel, generate a couple of short-lived
-  connections, drain the connect/accept/UDP events, and show both the raw events and the
-  parsed "S <proto> <lip> <lport> <rip> <rport> <pid>" line the helper would emit. It restores
-  the channel (disables it) on exit.
+  Validates the Windows "exact mode" path end to end, mirroring exactly what the embedded helper
+  does: configure the Microsoft-Windows-Kernel-Network Analytic channel via EventLogConfiguration
+  (prompt-free), enable it, then run repeated disable->read->re-enable drain cycles (the analytic
+  log is not readable while enabled), parsing connect/accept/UDP events into "S" lines and
+  attributing them to the owning PID. Restores the channel to its prior state on exit. No
+  persistent change.
 
-  MUST be run from an ELEVATED PowerShell. It makes no persistent change: the channel is left
-  disabled exactly as it was found.
-
-  Usage (elevated):  powershell -ExecutionPolicy Bypass -File tests\live\exact_mode_check.ps1
+  MUST be run from an ELEVATED PowerShell:
+      powershell -ExecutionPolicy Bypass -File tests\live\exact_mode_check.ps1
 #>
 $ErrorActionPreference = 'Continue'
 $chan = 'Microsoft-Windows-Kernel-Network/Analytic'
 $openIds = @(12, 15, 28, 31, 42, 43, 58, 59)   # TCP connect/accept (v4/v6), UDP send/recv (v4/v6)
+$idFilter = ($openIds | ForEach-Object { "EventID=$_" }) -join ' or '
 
 $elevated = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 if (-not $elevated) { Write-Host "FAIL: run this from an elevated PowerShell."; exit 2 }
 
-# local IPs, for mapping each event to its local endpoint
+# Local IP set, exactly as the helper builds it, to map an event to its local endpoint.
 $localSet = @{}
 foreach ($ni in [System.Net.NetworkInformation.NetworkInterface]::GetAllNetworkInterfaces()) {
     foreach ($ua in $ni.GetIPProperties().UnicastAddresses) { $localSet[$ua.Address.ToString()] = $true }
 }
 
-$wasEnabled = ((wevtutil gl $chan /f:xml) -match '<enabled>true</enabled>')
-Write-Host "channel was enabled: $wasEnabled ; enabling (circular, 8 MB)..."
-wevtutil sl $chan /e:true /rt:false /ms:8388608 2>$null
-if ($LASTEXITCODE -ne 0) { wevtutil sl $chan /e:true 2>$null }
-if ($LASTEXITCODE -ne 0) { Write-Host "FAIL: could not enable $chan"; exit 1 }
-
-try {
-    Start-Sleep -Milliseconds 300
-    Write-Host "our PID is $PID ; generating short-lived connections..."
-    # a short-lived TCP connection (opens and closes fast - the case polling misses)
-    try { $t = New-Object System.Net.Sockets.TcpClient; $t.Connect('1.1.1.1', 443); Start-Sleep -Milliseconds 150; $t.Close() } catch { Write-Host "  (tcp connect failed: $($_.Exception.Message.Split([char]10)[0]))" }
-    # a UDP DNS query
-    try { [System.Net.Dns]::GetHostAddresses('example.com') | Out-Null } catch {}
-    Start-Sleep -Milliseconds 1500   # let the buffers flush to the channel
-
-    $idFilter = ($openIds | ForEach-Object { "EventID=$_" }) -join ' or '
-    $events = @()
-    try { $events = @(Get-WinEvent -LogName $chan -Oldest -FilterXPath "*[System[($idFilter)]]" -MaxEvents 2000 -ErrorAction Stop) } catch {}
-    Write-Host ""
-    Write-Host "drained $($events.Count) connect/accept/UDP events. Sample (raw -> parsed):"
-    Write-Host "----------------------------------------------------------------------"
-
-    $parsed = 0; $ours = 0; $shown = 0
-    foreach ($e in $events) {
-        $epid = 0; try { $epid = [int]$e.Properties[0].Value } catch {}
-        $mm = [regex]::Matches([string]$e.Message, '([0-9A-Fa-f\.:%\[\]]+):(\d+)')
-        if ($mm.Count -lt 2 -or $epid -le 0) { continue }
-        $a1 = $mm[0].Groups[1].Value.Trim('[', ']'); $p1 = $mm[0].Groups[2].Value
-        $a2 = $mm[1].Groups[1].Value.Trim('[', ']'); $p2 = $mm[1].Groups[2].Value
-        $j = $a1.IndexOf('%'); if ($j -ge 0) { $a1 = $a1.Substring(0, $j) }
-        $j = $a2.IndexOf('%'); if ($j -ge 0) { $a2 = $a2.Substring(0, $j) }
-        $proto = if ($e.Id -ge 42) { 'udp' } else { 'tcp' }
-        if ($localSet.ContainsKey($a1) -or $a1 -like '127.*' -or $a1 -eq '::1') { $lip = $a1; $lport = $p1; $rip = $a2; $rport = $p2 }
-        elseif ($localSet.ContainsKey($a2)) { $lip = $a2; $lport = $p2; $rip = $a1; $rport = $p1 }
-        else { $lip = $a1; $lport = $p1; $rip = $a2; $rport = $p2 }
-        $parsed++
-        $line = "S $proto $lip $lport $rip $rport $epid"
-        $mine = ($epid -eq $PID)
-        if ($mine) { $ours++ }
-        if ($shown -lt 8 -or $mine) {
-            Write-Host ("  id={0}  pid={1}  msg={2}" -f $e.Id, $epid, ([string]$e.Message).Trim())
-            Write-Host ("     -> {0}{1}" -f $line, $(if ($mine) { '   <== THIS SCRIPT' } else { '' }))
-            $shown++
-        }
+# Verbatim copy of the helper's Set-KnChannel (see HELPER_PS1 in process_dissector.lua).
+function Set-KnChannel([bool]$enable) {
+    $c = New-Object System.Diagnostics.Eventing.Reader.EventLogConfiguration $script:chan
+    if ($enable) {
+        $c.ProviderKeywords = 0x30            # KERNEL_NETWORK IPv4 (0x10) | IPv6 (0x20)
+        $c.ProviderLevel = 4                  # Informational (the level of these events)
+        try { $c.MaximumSizeInBytes = 33554432 } catch {}   # 32 MB circular; best-effort
     }
-    Write-Host "----------------------------------------------------------------------"
-    Write-Host "parsed $parsed flows; $ours attributed to this script's own PID ($PID)."
-    if ($ours -ge 1) { Write-Host "PASS: exact mode captured and correctly attributed our own short-lived connection." }
-    else { Write-Host "WARN: did not see our own connection - retry, or the event format may differ (raw msgs above)." }
+    $c.IsEnabled = $enable
+    $c.SaveChanges()
+}
+function Get-Enabled { (New-Object System.Diagnostics.Eventing.Reader.EventLogConfiguration $chan).IsEnabled }
+
+# Drain one cycle the way the helper does: disable (flush), read, re-enable (clears + resumes).
+# Returns the events that were readable this cycle.
+function Invoke-Drain {
+    $events = @()
+    try {
+        Set-KnChannel $false
+        try { $events = @(Get-WinEvent -LogName $chan -Oldest -FilterXPath "*[System[($idFilter)]]" -MaxEvents 5000 -ErrorAction Stop) } catch { $events = @() }
+        Set-KnChannel $true
+    } catch { Write-Host "  drain error: $($_.Exception.Message.Split([char]10)[0])"; try { Set-KnChannel $true } catch {} }
+    return $events
+}
+
+# Parse one event to an "S proto lip lport rip rport pid" line, exactly as the helper does.
+function ConvertTo-SLine($e) {
+    $epid = 0; try { $epid = [int]$e.Properties[0].Value } catch {}
+    if ($epid -le 0) { return $null }
+    $mm = [regex]::Matches([string]$e.Message, '([0-9A-Fa-f\.:%\[\]]+):(\d+)')
+    if ($mm.Count -lt 2) { return $null }
+    $a1 = $mm[0].Groups[1].Value.Trim('[', ']'); $p1 = $mm[0].Groups[2].Value
+    $a2 = $mm[1].Groups[1].Value.Trim('[', ']'); $p2 = $mm[1].Groups[2].Value
+    $j = $a1.IndexOf('%'); if ($j -ge 0) { $a1 = $a1.Substring(0, $j) }
+    $j = $a2.IndexOf('%'); if ($j -ge 0) { $a2 = $a2.Substring(0, $j) }
+    $proto = if ($e.Id -ge 42) { 'udp' } else { 'tcp' }
+    if ($localSet.ContainsKey($a1) -or $a1 -like '127.*' -or $a1 -eq '::1') { $lip = $a1; $lport = $p1; $rip = $a2; $rport = $p2 }
+    elseif ($localSet.ContainsKey($a2)) { $lip = $a2; $lport = $p2; $rip = $a1; $rport = $p1 }
+    else { $lip = $a1; $lport = $p1; $rip = $a2; $rport = $p2 }
+    return [pscustomobject]@{ Pid = $epid; Id = $e.Id; Line = ('S {0} {1} {2} {3} {4} {5}' -f $proto, $lip, $lport, $rip, $rport, $epid) }
+}
+
+$wasEnabled = Get-Enabled
+Write-Host "channel enabled at start: $wasEnabled ; our PID is $PID"
+try {
+    Set-KnChannel $true
+    $chk = New-Object System.Diagnostics.Eventing.Reader.EventLogConfiguration $chan
+    $kw = if ($null -ne $chk.ProviderKeywords) { '0x' + ([int64]$chk.ProviderKeywords).ToString('X') } else { 'null' }
+    Write-Host ("enabled: keywords={0} level={1}`n" -f $kw, $chk.ProviderLevel)
+
+    $totalOurs = 0
+    foreach ($cycle in 1, 2) {
+        Write-Host "cycle ${cycle}: generating short-lived connections..."
+        foreach ($hp in @(@('1.1.1.1', 443), @('8.8.8.8', 443), @('9.9.9.9', 443))) {
+            try { $t = New-Object System.Net.Sockets.TcpClient; $t.Connect($hp[0], $hp[1]); Start-Sleep -Milliseconds 60; $t.Close() } catch {}
+        }
+        try { [System.Net.Dns]::GetHostAddresses('example.com') | Out-Null } catch {}
+        Start-Sleep -Milliseconds 800
+
+        $events = Invoke-Drain
+        $sLines = @($events | ForEach-Object { ConvertTo-SLine $_ } | Where-Object { $_ })
+        $ours = @($sLines | Where-Object { $_.Pid -eq $PID })
+        $totalOurs += $ours.Count
+        Write-Host ("  drained {0} events -> {1} S lines ; {2} attributed to THIS script" -f $events.Count, $sLines.Count, $ours.Count)
+        foreach ($s in ($ours | Select-Object -First 4)) { Write-Host ("    {0}   <== THIS SCRIPT" -f $s.Line) }
+        foreach ($s in (@($sLines | Where-Object { $_.Pid -ne $PID }) | Select-Object -First 3)) { Write-Host ("    {0}" -f $s.Line) }
+    }
+
+    Write-Host ""
+    if ($totalOurs -ge 1) { Write-Host "PASS: disable->read->re-enable loop captured and correctly attributed our own short-lived connections." }
+    else { Write-Host "NO EVENTS: paste all output above." }
 }
 finally {
-    if (-not $wasEnabled) { wevtutil sl $chan /e:false 2>$null; Write-Host "channel restored (disabled)." }
-    else { Write-Host "channel left enabled (it was already enabled before this run)." }
+    # Restore to prior state: if the channel was disabled before we started, disable it again.
+    try { if (-not $wasEnabled) { Set-KnChannel $false; Write-Host "restored: channel disabled." } else { Write-Host "left channel enabled (it was enabled before this run)." } } catch {}
 }
