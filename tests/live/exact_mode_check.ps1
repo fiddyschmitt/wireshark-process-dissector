@@ -74,6 +74,8 @@ try {
     Write-Host ("enabled: keywords={0} level={1}`n" -f $kw, $chk.ProviderLevel)
 
     $totalOurs = 0
+    $cycleOursPorts = @{}    # cycle -> hashtable of our local ephemeral ports seen that cycle
+    $cycleDrained = @{}      # cycle -> raw drained event count
     foreach ($cycle in 1, 2) {
         Write-Host "cycle ${cycle}: generating short-lived connections..."
         foreach ($hp in @(@('1.1.1.1', 443), @('8.8.8.8', 443), @('9.9.9.9', 443))) {
@@ -83,17 +85,37 @@ try {
         Start-Sleep -Milliseconds 800
 
         $events = Invoke-Drain
+        $cycleDrained[$cycle] = $events.Count
         $sLines = @($events | ForEach-Object { ConvertTo-SLine $_ } | Where-Object { $_ })
         $ours = @($sLines | Where-Object { $_.Pid -eq $PID })
         $totalOurs += $ours.Count
-        Write-Host ("  drained {0} events -> {1} S lines ; {2} attributed to THIS script" -f $events.Count, $sLines.Count, $ours.Count)
+        $ports = @{}; foreach ($s in $ours) { $ports[($s.Line -split ' ')[3]] = $true }   # S proto lip LPORT rip rport pid
+        $cycleOursPorts[$cycle] = $ports
+        Write-Host ("  drained {0} events -> {1} S lines ; {2} ours ; our local ports: {3}" -f $events.Count, $sLines.Count, $ours.Count, (($ports.Keys | Sort-Object) -join ','))
         foreach ($s in ($ours | Select-Object -First 4)) { Write-Host ("    {0}   <== THIS SCRIPT" -f $s.Line) }
-        foreach ($s in (@($sLines | Where-Object { $_.Pid -ne $PID }) | Select-Object -First 3)) { Write-Host ("    {0}" -f $s.Line) }
     }
 
     Write-Host ""
     if ($totalOurs -ge 1) { Write-Host "PASS: disable->read->re-enable loop captured and correctly attributed our own short-lived connections." }
     else { Write-Host "NO EVENTS: paste all output above." }
+
+    # The one assumption the helper relies on: re-enabling the channel CLEARS it, so each drain
+    # returns only events since the previous re-enable (that is why the helper keeps no high-water
+    # mark). Verify: cycle 2 must NOT re-report cycle 1's connections, identified by their unique
+    # local ephemeral ports.
+    $c1 = $cycleOursPorts[1]; $c2 = $cycleOursPorts[2]
+    Write-Host ("clearing check: cycle1 drained={0} ports=[{1}] ; cycle2 drained={2} ports=[{3}]" -f `
+        $cycleDrained[1], (($c1.Keys | Sort-Object) -join ','), $cycleDrained[2], (($c2.Keys | Sort-Object) -join ','))
+    if ($c1.Count -ge 1 -and $c2.Count -ge 1) {
+        $reappeared = @($c2.Keys | Where-Object { $c1.ContainsKey($_) })
+        if ($reappeared.Count -eq 0) {
+            Write-Host "CLEARS CONFIRMED: none of cycle 1's connections reappeared in cycle 2 -> re-enable clears the log; the helper's no-high-water-mark design is correct."
+        } else {
+            Write-Host ("DOES NOT CLEAR: cycle 1 port(s) [{0}] reappeared in cycle 2 -> re-enable does NOT clear the log. Harmless for correctness (evFlows dedups by tuple) but old flows keep refreshing and never age out; the helper should then track an EventRecordID high-water mark." -f ($reappeared -join ','))
+        }
+    } else {
+        Write-Host "CLEARING TEST INCONCLUSIVE: a cycle captured none of its own connections; re-run (transient socket timing)."
+    }
 }
 finally {
     # Restore to prior state: if the channel was disabled before we started, disable it again.
