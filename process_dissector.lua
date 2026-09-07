@@ -643,7 +643,10 @@ sockets_darwin() {
     }'
 }
 lsof_sockets() {
-    $SUDO lsof -nP -iTCP -iUDP -F pcnP +c 0 2>/dev/null | awk '
+    # -b -w: never call blocking kernel functions (stat/lstat/readlink). Without this, a single
+    # hung or slow network mount (SMB/NFS/Time Machine) stalls lsof ~15-20s while it builds its
+    # mount table, which would freeze every tick. Sockets and exe paths come back regardless.
+    $SUDO lsof -b -w -nP -iTCP -iUDP -F pcnP +c 0 2>/dev/null | awk '
     function addr(s,   i, j, ip, port) {
         j = 0
         for (i = length(s); i > 0; i--) if (substr(s, i, 1) == ":") { j = i; break }
@@ -697,8 +700,9 @@ details_darwin() {   # $1 = comma separated pid list (the pids to resolve THIS c
     ps -ww -p "$1" -o pid=,ucomm= 2>/dev/null | awk '{p=$1; $1=""; sub(/^ +/, ""); print p "\t" $0}' > "$D.n"
     ps -ww -p "$1" -o pid=,comm=  2>/dev/null | awk '{p=$1; $1=""; sub(/^ +/, ""); print p "\t" $0}' > "$D.c"
     ps -ww -p "$1" -o pid=,args=  2>/dev/null | awk '{p=$1; $1=""; sub(/^ +/, ""); print p "\t" $0}' > "$D.a"
-    # real executable path: first "txt" entry of the process (ps comm shows argv[0])
-    $SUDO lsof -p "$1" -a -d txt -Fpn 2>/dev/null | awk '/^p/ { p = substr($0, 2); seen = 0; next } /^n/ && !seen { seen = 1; print p "\t" substr($0, 2) }' > "$D.x"
+    # real executable path: first "txt" entry of the process (ps comm shows argv[0]).
+    # -b -w for the same reason as lsof_sockets: stay non-blocking when a network mount hangs.
+    $SUDO lsof -b -w -p "$1" -a -d txt -Fpn 2>/dev/null | awk '/^p/ { p = substr($0, 2); seen = 0; next } /^n/ && !seen { seen = 1; print p "\t" substr($0, 2) }' > "$D.x"
     # Emit exactly one line per REQUESTED pid, using the best data from any source.
     # (Driving output off the requested list -- not the hint file, which holds every
     # socket's pid -- avoids emitting spurious empty rows for already-cached pids.)
