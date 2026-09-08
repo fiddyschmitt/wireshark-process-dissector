@@ -12,6 +12,8 @@ Get `process_dissector.lua` from the [releases](https://github.com/fiddyschmitt/
 
 ## Fields
 
+To show a field as a column, right-click it in the packet details and choose *Apply as Column*.
+
 | Field | Description |
 |---|---|
 | `process.pid` | Process ID |
@@ -24,7 +26,7 @@ Get `process_dissector.lua` from the [releases](https://github.com/fiddyschmitt/
 | `process.cmdline` | Command line |
 | `process.side` | `src` or `dst` — which end of the packet the process owns |
 
-## Examples
+## Example filters
 
 ```
 process.name == "chrome.exe"
@@ -34,8 +36,6 @@ process.side == "src" && process.pid == 1234
 process.service == "Dnscache"
 process.service_display contains "DNS"
 ```
-
-To show a field as a column, right-click it in the packet details and choose *Apply as Column*.
 
 ## How it works
 
