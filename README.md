@@ -4,7 +4,7 @@ See which process sent or received each packet in Wireshark, and filter on it.
 
 Windows, Linux and macOS. A single Lua file.
 
-<img src="img/columns.png" width="800">
+<img src="img/columns.png">
 
 ## Download
 
