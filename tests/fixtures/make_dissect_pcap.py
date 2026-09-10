@@ -25,6 +25,9 @@ def udp(sport, dport, payload=b"x"):
 def icmp4():
     return struct.pack("!BBHHH", 8, 0, 0, 1, 1) + b"ping"  # echo request
 
+def icmp4_error(orig):
+    return struct.pack("!BBHI", 3, 3, 0, 0) + orig  # dest-unreachable/port, then the quoted datagram
+
 def eth(etype, payload):
     return struct.pack("!6s6sH", b"\x02\x00\x00\x00\x00\x02", b"\x02\x00\x00\x00\x00\x01", etype) + payload
 
@@ -49,6 +52,9 @@ frames = [
     # 8 ARP -> not IP/TCP/UDP, no attribution
     eth(ARP, b"\x00\x01\x08\x00\x06\x04\x00\x01" + b"\x02\x00\x00\x00\x00\x01" + socket.inet_aton("10.0.0.1")
              + b"\x00\x00\x00\x00\x00\x00" + socket.inet_aton("10.0.0.2")),
+    # 9 ICMP error quoting a TCP header for the SAME local flow as frame 1 (10.0.0.5:5000). port_type
+    #   can read as TCP from the quote, so only the icmp/icmpv6 guard stops it attributing to alpha.exe.
+    eth(IP, ipv4("192.168.0.1", "10.0.0.5", ICMP, icmp4_error(ipv4("10.0.0.5", "93.184.216.34", TCP, tcp(5000, 443)[:8])))),
 ]
 
 out = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dissect.pcap")

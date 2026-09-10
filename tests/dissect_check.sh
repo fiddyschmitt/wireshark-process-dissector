@@ -47,6 +47,7 @@ expect 5 4 "src,dst" "loopback sides (both ends attributed)"
 expect 6 2 "" "icmp -> no attribution"
 expect 7 2 "" "remote-to-remote -> no attribution"
 expect 8 2 "" "arp -> no attribution"
+expect 9 2 "" "icmp error quoting TCP -> excluded by the icmp guard (would else match alpha.exe)"
 # age guard: opening an OLD capture must not read snapshots or launch a helper -> no attribution
 gotold=$(printf '%s\n' "$OLD" | awk -F'|' '$1==1{print $2}')
 if [ -n "$gotold" ]; then echo "FAIL: age guard: old capture attributed frame 1 [$gotold] (should skip)"; fail=1; fi
