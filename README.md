@@ -54,4 +54,4 @@ On **Windows, when Wireshark runs elevated**, the helper also consumes Kernel-Ne
 tshark -X lua_script:tests/run_tests.lua -r tests/empty.pcap
 ```
 
-Live-capture checks are in `tests/live/` (`exact_mode_check.ps1` validates the elevated Windows path). `test_env/` stands up a throwaway Linux desktop VM for testing.
+Live-capture checks are in `tests/live/`. `comprehensive.ps1` (Windows) and `comprehensive.sh` (Linux/macOS) exercise TCP+UDP over IPv4+IPv6, listening and connected, on loopback, and assert every field is populated for every socket type. `exact_mode_check.ps1` validates the elevated Windows connection-events path. `test_env/` stands up a throwaway Linux desktop VM for testing.
