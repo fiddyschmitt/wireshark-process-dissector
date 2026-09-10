@@ -271,6 +271,24 @@ PD.set_prune_keys(250000)
 PD.reset_cache()
 
 ------------------------------------------------------------------------------
+out("== build_launch_command")
+PD.set_timing(1, 300)   -- poll 1 s -> poll_ms 1000
+local lpaths = PD.helper_paths()
+local lcmd = PD.build_launch_command(lpaths)
+if PD.platform == "windows" then
+    check(lcmd:find("powershell.exe", 1, true) ~= nil, "launch: uses powershell")
+    check(lcmd:find('start "" /min', 1, true) ~= nil, "launch: detached + minimized")
+    check(lcmd:find('-File "' .. lpaths.script .. '"', 1, true) ~= nil, "launch: -File quotes the script path")
+    check(lcmd:find('-OutDir "' .. lpaths.dir .. '"', 1, true) ~= nil, "launch: -OutDir quotes the dir")
+    check(lcmd:find("-Interval 1000", 1, true) ~= nil, "launch: passes poll_ms as -Interval")
+    check(lcmd:find("-ExactMode", 1, true) ~= nil, "launch: requests exact mode (pref default on)")
+else
+    check(lcmd:find('nohup /bin/sh "' .. lpaths.script .. '"', 1, true) ~= nil, "launch: runs helper.sh via nohup sh")
+    check(lcmd:find(" 1000 ", 1, true) ~= nil, "launch: passes poll_ms")
+    check(lcmd:match("&%s*$") ~= nil, "launch: backgrounds the helper")
+end
+
+------------------------------------------------------------------------------
 -- Helper scripts run in parse-only mode against fixtures.
 ------------------------------------------------------------------------------
 out("== helper scripts (fixture mode)")
@@ -312,6 +330,18 @@ if IS_WINDOWS then
         for _ in pairs(sn.procs) do anyproc = true; break end
         check(anyproc, "ps1 produced P lines for live PIDs")
         check(#sn.locals > 0, "ps1 produced L lines")
+    end
+    -- IP Helper API path (no -NetstatFile): one tick against the live socket tables.
+    os.remove(snapfile)
+    os.execute(string.format('powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%s" -Once -OutDir "%s"', ps1, OUT))
+    local apitext = read_all(snapfile)
+    check(apitext ~= nil, "helper.ps1 API path produced a snapshot")
+    if apitext then
+        local _, asn = socket_map(apitext)
+        eq(asn.version, 1, "API snapshot version")
+        check(#asn.sockets > 0, "API path produced S lines from the live socket tables (GetExtended*Table)")
+        local anyp = false; for _ in pairs(asn.procs) do anyp = true; break end
+        check(anyp, "API path resolved at least one process via CIM")
     end
 else
     skipped("helper.ps1 (not on Windows)")

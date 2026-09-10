@@ -1,0 +1,15 @@
+V 1 1700000000 1
+L 10.0.0.5
+L fd00::5
+S tcp 10.0.0.5 5000 93.184.216.34 443 1001
+S tcp fd00::5 5001 2606:2800:220:1:248:1893:25c8:1946 443 1002
+S udp 10.0.0.5 5002 8.8.8.8 53 1003
+S udp fd00::5 5003 2001:4860:4860::8888 53 1004
+S tcp 127.0.0.1 5004 127.0.0.1 8080 1005
+S tcp 127.0.0.1 8080 * 0 1006
+P 1001	alpha.exe	/opt/alpha/alpha	alpha --run
+P 1002	beta.exe	/opt/beta/beta	beta
+P 1003	gamma.exe	/opt/gamma/gamma	gamma
+P 1004	delta.exe	/opt/delta/delta	delta
+P 1005	client.exe	/opt/c/client	client
+P 1006	server.exe	/opt/s/server	server
