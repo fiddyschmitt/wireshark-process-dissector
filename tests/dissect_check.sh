@@ -26,6 +26,8 @@ run() { MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' "$TS" -r "$PCAP" -o process.e
       -e process.folder -e process.filename -e process.path -e process.cmdline 2>/dev/null; }
 OUT=$(run -o process.max_age:4000000000)   # huge max_age: the fixed-timestamp fixture attributes
 OLD=$(run)                                 # default max_age (300 s): an old capture must NOT attribute
+sed 's/^V 1 /V 2 /' "$FIX/dissect.snapshot" > "$TMP/snapshot.txt"
+VER2=$(run -o process.max_age:4000000000)  # unknown snapshot version must be ignored
 rm -rf "$TMP"
 echo "$OUT"
 fail=0
@@ -48,5 +50,8 @@ expect 8 2 "" "arp -> no attribution"
 # age guard: opening an OLD capture must not read snapshots or launch a helper -> no attribution
 gotold=$(printf '%s\n' "$OLD" | awk -F'|' '$1==1{print $2}')
 if [ -n "$gotold" ]; then echo "FAIL: age guard: old capture attributed frame 1 [$gotold] (should skip)"; fail=1; fi
-if [ "$fail" = 0 ]; then echo "RESULT: PASS (dissector: every path attributed correctly; old-capture guard holds)"; else echo "RESULT: FAIL"; fi
+# version guard: a snapshot with an unknown version must be ignored, not misparsed
+gotv2=$(printf '%s\n' "$VER2" | awk -F'|' '$1==1{print $2}')
+if [ -n "$gotv2" ]; then echo "FAIL: version guard: unknown-version snapshot attributed frame 1 [$gotv2] (should ignore)"; fail=1; fi
+if [ "$fail" = 0 ]; then echo "RESULT: PASS (dissector paths + old-capture and unknown-version snapshot guards)"; else echo "RESULT: FAIL"; fi
 exit $fail
