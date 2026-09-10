@@ -25,7 +25,7 @@
 --
 -- Preferences: Edit > Preferences > Protocols > Process Info.
 
-local VERSION = "0.2.0"
+local VERSION = "0.2.1"
 
 ------------------------------------------------------------------------------
 -- 1. Shims and small utilities
