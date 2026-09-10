@@ -1,0 +1,29 @@
+#!/bin/sh
+# Refuse to push a vX.Y.Z tag unless process_dissector.lua's VERSION == X.Y.Z,
+# so the release tag and the version the plugin reports can never drift again.
+#
+# Enable once per clone:  git config core.hooksPath .githooks
+# It only acts when a version tag is pushed; ordinary branch pushes are untouched.
+# NOTE: create the tag locally (git tag vX.Y.Z) and push it so this fires -- a tag
+# created server-side by `gh release create` bypasses local hooks. See RELEASING.md.
+
+status=0
+while read -r local_ref local_sha remote_ref remote_sha; do
+    case "$remote_ref" in
+        refs/tags/v[0-9]*)
+            tag=${remote_ref#refs/tags/v}
+            # tag deletion sends an all-zero local_sha; nothing to check
+            case "$local_sha" in *[!0]*) ;; *) continue ;; esac
+            commit=$(git rev-parse "$local_sha^{commit}" 2>/dev/null) || continue
+            ver=$(git show "$commit:process_dissector.lua" 2>/dev/null \
+                  | sed -n 's/^local VERSION *= *"\([^"]*\)".*/\1/p' | head -1)
+            if [ "$ver" != "$tag" ]; then
+                short=$(git rev-parse --short "$commit" 2>/dev/null)
+                echo "pre-push: refusing tag v$tag -- process_dissector.lua VERSION=\"$ver\" at $short." >&2
+                echo "          Bump VERSION to $tag, commit, re-tag, then push. (See RELEASING.md)" >&2
+                status=1
+            fi
+            ;;
+    esac
+done
+exit $status
