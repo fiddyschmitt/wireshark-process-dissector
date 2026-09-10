@@ -392,12 +392,14 @@ $chanMarker = Join-Path $OutDir 'channel.enabled'   # exists while we own an ena
 
 function Set-KnChannel([bool]$enable) {
     $c = New-Object System.Diagnostics.Eventing.Reader.EventLogConfiguration $script:knChannel
-    if ($enable) {
-        $c.ProviderKeywords = 0x30            # KERNEL_NETWORK IPv4 (0x10) | IPv6 (0x20)
-        $c.ProviderLevel = 4                  # Informational (the level of these events)
-        try { $c.MaximumSizeInBytes = 33554432 } catch {}   # 32 MB circular; best-effort
-    }
-    $c.IsEnabled = $enable
+    if (-not $enable) { $c.IsEnabled = $false; $c.SaveChanges(); return }
+    # A direct (analytic) channel's config cannot be changed while it is enabled. If it is already
+    # on (e.g. left over from an interrupted run), disable it first, then configure and enable.
+    if ($c.IsEnabled) { $c.IsEnabled = $false; $c.SaveChanges(); $c = New-Object System.Diagnostics.Eventing.Reader.EventLogConfiguration $script:knChannel }
+    $c.ProviderKeywords = 0x30            # KERNEL_NETWORK IPv4 (0x10) | IPv6 (0x20)
+    $c.ProviderLevel = 4                  # Informational (the level of these events)
+    try { $c.MaximumSizeInBytes = 33554432 } catch {}   # 32 MB circular; best-effort
+    $c.IsEnabled = $true
     $c.SaveChanges()
 }
 

@@ -26,12 +26,13 @@ foreach ($ni in [System.Net.NetworkInformation.NetworkInterface]::GetAllNetworkI
 # Verbatim copy of the helper's Set-KnChannel (see HELPER_PS1 in process_dissector.lua).
 function Set-KnChannel([bool]$enable) {
     $c = New-Object System.Diagnostics.Eventing.Reader.EventLogConfiguration $script:chan
-    if ($enable) {
-        $c.ProviderKeywords = 0x30            # KERNEL_NETWORK IPv4 (0x10) | IPv6 (0x20)
-        $c.ProviderLevel = 4                  # Informational (the level of these events)
-        try { $c.MaximumSizeInBytes = 33554432 } catch {}   # 32 MB circular; best-effort
-    }
-    $c.IsEnabled = $enable
+    if (-not $enable) { $c.IsEnabled = $false; $c.SaveChanges(); return }
+    # A direct (analytic) channel cannot be reconfigured while enabled; disable first if needed.
+    if ($c.IsEnabled) { $c.IsEnabled = $false; $c.SaveChanges(); $c = New-Object System.Diagnostics.Eventing.Reader.EventLogConfiguration $script:chan }
+    $c.ProviderKeywords = 0x30            # KERNEL_NETWORK IPv4 (0x10) | IPv6 (0x20)
+    $c.ProviderLevel = 4                  # Informational (the level of these events)
+    try { $c.MaximumSizeInBytes = 33554432 } catch {}   # 32 MB circular; best-effort
+    $c.IsEnabled = $true
     $c.SaveChanges()
 }
 function Get-Enabled { (New-Object System.Diagnostics.Eventing.Reader.EventLogConfiguration $chan).IsEnabled }
@@ -118,6 +119,7 @@ try {
     }
 }
 finally {
-    # Restore to prior state: if the channel was disabled before we started, disable it again.
-    try { if (-not $wasEnabled) { Set-KnChannel $false; Write-Host "restored: channel disabled." } else { Write-Host "left channel enabled (it was enabled before this run)." } } catch {}
+    # Always leave the channel disabled -- its only safe resting state (the dissector enables it
+    # only transiently). This also cleans up a channel left enabled by an earlier interrupted run.
+    try { Set-KnChannel $false; Write-Host "restored: channel disabled." } catch { Write-Host ("restore failed: " + $_.Exception.Message.Split([char]10)[0]) }
 }
