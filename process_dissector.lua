@@ -183,10 +183,49 @@ param(
     [string]$OutDir = "",
     [switch]$Once,
     [string]$NetstatFile = "",
-    [switch]$ExactMode          # elevated only: also consume Kernel-Network connect/accept events
+    [switch]$ExactMode,         # elevated only: also consume Kernel-Network connect/accept events
+    [string]$ParseKnEventsFile = ""   # test only: parse canned Kernel-Network events, print flow keys, exit
 )
 $ErrorActionPreference = 'Continue'
 if (-not $OutDir) { $OutDir = Split-Path -Parent $PSCommandPath }
+
+function Get-KnFlowKey([int]$id, [int]$epid, [string]$message, $localSet) {
+    # Parse one Kernel-Network event into a flow key "proto|lip|lport|rip|rport|pid", or $null.
+    # The message carries two ip:port pairs (destination and source, in some order); the local end
+    # is whichever address is in $localSet (or loopback), so connect / accept / recv all map right.
+    if ($epid -le 0) { return $null }
+    $mm = [regex]::Matches($message, '([0-9A-Fa-f\.:%\[\]]+):(\d+)')
+    if ($mm.Count -lt 2) { return $null }
+    $a1 = $mm[0].Groups[1].Value.Trim('[', ']'); $p1 = $mm[0].Groups[2].Value
+    $a2 = $mm[1].Groups[1].Value.Trim('[', ']'); $p2 = $mm[1].Groups[2].Value
+    $j = $a1.IndexOf('%'); if ($j -ge 0) { $a1 = $a1.Substring(0, $j) }
+    $j = $a2.IndexOf('%'); if ($j -ge 0) { $a2 = $a2.Substring(0, $j) }
+    $eproto = if ($id -ge 42) { 'udp' } else { 'tcp' }
+    if ($localSet.ContainsKey($a1) -or $a1 -like '127.*' -or $a1 -eq '::1') { $lip = $a1; $lport = $p1; $rip = $a2; $rport = $p2 }
+    elseif ($localSet.ContainsKey($a2)) { $lip = $a2; $lport = $p2; $rip = $a1; $rport = $p1 }
+    else { $lip = $a1; $lport = $p1; $rip = $a2; $rport = $p2 }
+    return "$eproto|$lip|$lport|$rip|$rport|$epid"
+}
+
+if ($ParseKnEventsFile) {
+    # Parse-only test mode (no elevation, no channel, no polling). Input lines:
+    #   LOCALS <ip> <ip> ...            zones are stripped, mirroring the live local-IP set
+    #   <id>\t<pid>\t<message>          one Kernel-Network event; prints its flow key (or NULL)
+    $ls = @{}
+    foreach ($line in (Get-Content -LiteralPath $ParseKnEventsFile)) {
+        if ($line -like 'LOCALS *') {
+            foreach ($ip in ($line.Substring(7) -split '\s+')) {
+                if ($ip) { $z = $ip.IndexOf('%'); if ($z -ge 0) { $ip = $ip.Substring(0, $z) }; $ls[$ip] = $true }
+            }
+            continue
+        }
+        $parts = $line -split "`t", 3
+        if ($parts.Count -lt 3) { continue }
+        $k = Get-KnFlowKey ([int]$parts[0]) ([int]$parts[1]) $parts[2] $ls
+        if ($k) { $k } else { 'NULL' }
+    }
+    exit 0
+}
 $snap       = Join-Path $OutDir 'snapshot.txt'
 $tmp        = Join-Path $OutDir 'snapshot.tmp'
 $pidFile    = Join-Path $OutDir 'helper.pid'
@@ -416,7 +455,7 @@ try {
         # new Kernel-Network connect/accept events into $evFlows and emit the ephemeral ones.
         if ($ipTick -le 0) {
             $localIPs = @(Get-LocalIPs)
-            $localSet = @{}; foreach ($ip in $localIPs) { $localSet[$ip] = $true }
+            $localSet = @{}; foreach ($ip in $localIPs) { $z = $ip.IndexOf('%'); if ($z -ge 0) { $ip = $ip.Substring(0, $z) }; $localSet[$ip] = $true }
             $ipTick = 240
         }
         $ipTick--
@@ -438,19 +477,8 @@ try {
                 } catch { Write-Log ('exact-mode drain error: ' + $_.Exception.Message); try { Set-KnChannel $true } catch {} }
                 foreach ($e in $events) {
                     $epid = 0; try { $epid = [int]$e.Properties[0].Value } catch {}
-                    if ($epid -le 0) { continue }
-                    $mm = [regex]::Matches([string]$e.Message, '([0-9A-Fa-f\.:%\[\]]+):(\d+)')
-                    if ($mm.Count -lt 2) { continue }
-                    $a1 = $mm[0].Groups[1].Value.Trim('[', ']'); $p1 = $mm[0].Groups[2].Value
-                    $a2 = $mm[1].Groups[1].Value.Trim('[', ']'); $p2 = $mm[1].Groups[2].Value
-                    $j = $a1.IndexOf('%'); if ($j -ge 0) { $a1 = $a1.Substring(0, $j) }
-                    $j = $a2.IndexOf('%'); if ($j -ge 0) { $a2 = $a2.Substring(0, $j) }
-                    $eproto = if ($e.Id -ge 42) { 'udp' } else { 'tcp' }
-                    # assign local/remote by IP membership, so connect / accept / recv all map right
-                    if ($localSet.ContainsKey($a1) -or $a1 -like '127.*' -or $a1 -eq '::1') { $lip = $a1; $lport = $p1; $rip = $a2; $rport = $p2 }
-                    elseif ($localSet.ContainsKey($a2)) { $lip = $a2; $lport = $p2; $rip = $a1; $rport = $p1 }
-                    else { $lip = $a1; $lport = $p1; $rip = $a2; $rport = $p2 }
-                    $evFlows["$eproto|$lip|$lport|$rip|$rport|$epid"] = $tick
+                    $k = Get-KnFlowKey $e.Id $epid ([string]$e.Message) $localSet
+                    if ($k) { $evFlows[$k] = $tick }
                 }
                 $evDrainAt = (Get-Date).AddSeconds(1)
             }

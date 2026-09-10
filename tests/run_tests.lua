@@ -343,6 +343,25 @@ if IS_WINDOWS then
         local anyp = false; for _ in pairs(asn.procs) do anyp = true; break end
         check(anyp, "API path resolved at least one process via CIM")
     end
+    -- exact-mode event parsing (non-elevated): feed canned Kernel-Network events, check flow keys.
+    -- (The elevated channel drain itself is covered by tests/live/exact_mode_check.ps1.)
+    out("== exact-mode event parsing")
+    local knout = OUT .. "\\kn_keys.txt"; os.remove(knout)
+    os.execute(string.format('powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%s" -ParseKnEventsFile "%s" > "%s"', ps1, FIX .. "kn_events.txt", knout))
+    local kn = read_all(knout)
+    check(kn ~= nil, "exact-mode parse produced output")
+    if kn then
+        local keys = {}
+        for line in kn:gmatch("[^\r\n]+") do keys[#keys + 1] = line end
+        eq(keys[1], "tcp|10.0.0.5|5000|93.184.216.34|443|1001", "kn: tcp v4 connect")
+        eq(keys[2], "tcp|fd00::5|5001|2606:2800:220:1:248:1893:25c8:1946|443|1002", "kn: tcp v6 connect")
+        eq(keys[3], "udp|10.0.0.5|5002|8.8.8.8|53|1003", "kn: udp v4 send")
+        eq(keys[4], "tcp|fd00::5|8080|2606:2800:220:1:248:1893:25c8:1946|33000|1004", "kn: tcp v6 accept (local listener)")
+        eq(keys[5], "tcp|127.0.0.1|8080|127.0.0.1|5004|1005", "kn: loopback")
+        eq(keys[6], "tcp|fe80::1|5005|fe80::2|443|1006", "kn: link-local (zone stripped, matched local)")
+        eq(keys[7], "NULL", "kn: pid 0 rejected")
+        eq(keys[8], "NULL", "kn: single ip:port rejected")
+    end
 else
     skipped("helper.ps1 (not on Windows)")
 end

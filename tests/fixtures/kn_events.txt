@@ -1,0 +1,9 @@
+LOCALS 10.0.0.5 fd00::5 fe80::1
+12	1001	TcpConnectTcbComplete: 93.184.216.34:443 10.0.0.5:5000
+28	1002	TcpConnectTcbComplete: [2606:2800:220:1:248:1893:25c8:1946]:443 [fd00::5]:5001
+42	1003	UdpEndpointSendMessages: 8.8.8.8:53 10.0.0.5:5002
+31	1004	TcpAcceptListenerComplete: [fd00::5]:8080 [2606:2800:220:1:248:1893:25c8:1946]:33000
+12	1005	TcpConnectTcbComplete: 127.0.0.1:8080 127.0.0.1:5004
+12	1006	TcpConnectTcbComplete: [fe80::2%12]:443 [fe80::1%12]:5005
+12	0	TcpConnectTcbComplete: 1.2.3.4:1 5.6.7.8:2
+99	1007	Garbage with only 1.2.3.4:5 one pair
