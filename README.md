@@ -53,6 +53,7 @@ On **Windows, when Wireshark runs elevated**, the helper also consumes Kernel-Ne
 ```
 tshark -X lua_script:tests/run_tests.lua -r tests/empty.pcap   # unit tests: parsing, cache, launch, socket fixtures
 sh tests/dissect_check.sh <tshark>                             # offline: dissect a fixture pcap, assert fields per socket type
+sh tests/pktap_check.sh <tshark>                               # offline: assert macOS pktap process metadata is mirrored
 ```
 
 Live-capture checks are in `tests/live/`. `comprehensive.ps1` (Windows) and `comprehensive.sh` (Linux/macOS) exercise TCP+UDP over IPv4+IPv6, listening and connected, on loopback, and assert every field is populated for every socket type. `service_check.ps1` confirms Windows service fields resolve on a 60&nbsp;s live capture, and `multi_instance.ps1` confirms two instances run at once off one shared helper. `exact_mode_check.ps1` validates the elevated Windows connection-events path (needs an elevated shell). `test_env/` stands up a throwaway Linux desktop VM for testing.

@@ -1479,10 +1479,17 @@ end
 -- 11. Dissector
 ------------------------------------------------------------------------------
 
+-- macOS carries per-packet process info two ways: Wireshark's own captures store it as pcapng
+-- options (frame.darwin.process_info.*); DLT_PKTAP captures (e.g. tcpdump -i pktap) carry a
+-- pktap header (pktap.*). Read whichever is present.
 local pk_pid    = pcall_field("frame.darwin.process_info.pid")
 local pk_pname  = pcall_field("frame.darwin.process_info.pname")
 local pk_epid   = pcall_field("frame.darwin.process_info.epid")
 local pk_epname = pcall_field("frame.darwin.process_info.epname")
+local pt_pid    = pcall_field("pktap.pid")
+local pt_pname  = pcall_field("pktap.cmdname")
+local pt_epid   = pcall_field("pktap.epid")
+local pt_epname = pcall_field("pktap.ecmdname")
 local icmp_f    = pcall_field("icmp")
 local icmpv6_f  = pcall_field("icmpv6")
 
@@ -1510,22 +1517,28 @@ local function add_process(tree, root, rec, side, label_prefix)
     return root, shown
 end
 
--- macOS pktap captures already carry process metadata; mirror it into our fields.
+-- Returns pid, name, epid, ename from whichever macOS metadata source the frame carries, or nil.
+local function pktap_meta()
+    local fi = pk_pid and pk_pid()
+    local get = nil
+    if fi then get = { fi, pk_pname and pk_pname(), pk_epid and pk_epid(), pk_epname and pk_epname() }
+    else
+        fi = pt_pid and pt_pid()
+        if fi then get = { fi, pt_pname and pt_pname(), pt_epid and pt_epid(), pt_epname and pt_epname() } end
+    end
+    if not get then return nil end
+    local function num(f) return f and (tonumber(tostring(f.value)) or 0) or 0 end
+    local function str(f) return f and tostring(f.value) or "" end
+    return num(get[1]), str(get[2]), num(get[3]), str(get[4])
+end
+
+-- macOS captures already carry process metadata; mirror it into our fields (skips the socket lookup).
 local function mirror_pktap(tree)
-    if not pk_pid then return false end
-    local fi = pk_pid()
-    if not fi then return false end
-    local pid = tonumber(tostring(fi.value)) or 0
-    local nm = pk_pname and pk_pname()
-    local name = nm and tostring(nm.value) or ""
+    local pid, name, epid, ename = pktap_meta()
+    if not pid then return false end
     local root = add_process(tree, nil, make_record(pid, name, "", ""), "src", "Process (capture metadata)")
-    local efi = pk_epid and pk_epid()
-    if efi then
-        local epid = tonumber(tostring(efi.value)) or 0
-        if epid ~= 0 and epid ~= pid then
-            local enm = pk_epname and pk_epname()
-            add_process(tree, root, make_record(epid, enm and tostring(enm.value) or "", "", ""), "src", "Effective process (capture metadata)")
-        end
+    if epid ~= 0 and epid ~= pid then
+        add_process(tree, root, make_record(epid, ename, "", ""), "src", "Effective process (capture metadata)")
     end
     return true
 end
