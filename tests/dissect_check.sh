@@ -20,11 +20,12 @@ cp "$FIX/dissect.snapshot" "$TMP/snapshot.txt"
 PCAP="$FIX/dissect.pcap"; HDIR="$TMP"
 if command -v cygpath >/dev/null 2>&1; then PCAP=$(cygpath -m "$FIX/dissect.pcap"); HDIR=$(cygpath -m "$TMP"); fi
 # helper_autostart FALSE (no helper), max_age huge so the fixed-timestamp fixture is not "too old".
-OUT=$(MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' "$TS" -r "$PCAP" -o process.enabled:TRUE -o process.helper_autostart:FALSE \
-      -o "process.helper_dir:$HDIR" -o process.max_age:4000000000 \
-      -T fields -E separator='|' -E occurrence=a -E aggregator=',' \
+run() { MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' "$TS" -r "$PCAP" -o process.enabled:TRUE -o process.helper_autostart:FALSE \
+      -o "process.helper_dir:$HDIR" "$@" -T fields -E separator='|' -E occurrence=a -E aggregator=',' \
       -e frame.number -e process.pid -e process.name -e process.side \
-      -e process.folder -e process.filename -e process.path -e process.cmdline 2>/dev/null)
+      -e process.folder -e process.filename -e process.path -e process.cmdline 2>/dev/null; }
+OUT=$(run -o process.max_age:4000000000)   # huge max_age: the fixed-timestamp fixture attributes
+OLD=$(run)                                 # default max_age (300 s): an old capture must NOT attribute
 rm -rf "$TMP"
 echo "$OUT"
 fail=0
@@ -44,5 +45,8 @@ expect 5 4 "src,dst" "loopback sides (both ends attributed)"
 expect 6 2 "" "icmp -> no attribution"
 expect 7 2 "" "remote-to-remote -> no attribution"
 expect 8 2 "" "arp -> no attribution"
-if [ "$fail" = 0 ]; then echo "RESULT: PASS (dissector: every path attributed correctly)"; else echo "RESULT: FAIL"; fi
+# age guard: opening an OLD capture must not read snapshots or launch a helper -> no attribution
+gotold=$(printf '%s\n' "$OLD" | awk -F'|' '$1==1{print $2}')
+if [ -n "$gotold" ]; then echo "FAIL: age guard: old capture attributed frame 1 [$gotold] (should skip)"; fail=1; fi
+if [ "$fail" = 0 ]; then echo "RESULT: PASS (dissector: every path attributed correctly; old-capture guard holds)"; else echo "RESULT: FAIL"; fi
 exit $fail
